@@ -51,7 +51,8 @@
         :skills="skills"
         :plugins="plugins"
         :is-loading-plugins="false"
-        :is-turn-in-progress="false"
+        :is-turn-in-progress="isRunningFixture"
+        :can-stop="isRunningFixture ? canStopFixture : undefined"
         :is-interrupting-turn="false"
         :is-updating-speed-mode="false"
         :send-with-enter="sendWithEnter"
@@ -82,6 +83,11 @@ import { useMobile } from '../../composables/useMobile'
 import { resolveSendWithEnterPreference } from '../../composables/composerEnterBehavior'
 
 const models = ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini']
+const fixtureSearchParams = typeof window !== 'undefined'
+  ? new URLSearchParams(window.location.search || window.location.hash.split('?')[1] || '')
+  : null
+const isRunningFixture = fixtureSearchParams?.get('running') === '1'
+const canStopFixture = fixtureSearchParams?.get('canStop') !== '0'
 const reasoningOptions = (values: ReasoningEffort[]) => values.map((value) => ({ value, description: '' }))
 const availableModels: ComposerModelInfo[] = [
   {

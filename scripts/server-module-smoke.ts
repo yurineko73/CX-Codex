@@ -11497,6 +11497,7 @@ async function smokeAppServerSessionLogThreadRead(): Promise<void> {
     assert.equal(isSessionLogThreadReadCandidateLine('{"timestamp":"2026-07-06T10:00:00.000Z","type":"compaction","payload":{"text":"\\"type\\":\\"response_item\\",\\"role\\":\\"user\\""}}'), false)
     assert.equal(isSessionLogThreadReadCandidateLine('{"type":"fileChange","payload":{"path":"src/a.ts"}}'), false)
     assert.equal(isSessionLogThreadReadCandidateLine('{malformed'), false)
+    assert.equal(isSessionLogThreadReadCandidateLine('{"timestamp":"2026-07-06T10:00:00.000Z","ordinal":7,"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-ordinal"}}'), true)
 
     const sessionPath = join(dir, 'rollout-2026-07-06T10-00-00-thread-fallback.jsonl')
     await writeFile(sessionPath, [
@@ -11698,6 +11699,66 @@ async function smokeAppServerSessionLogThreadRead(): Promise<void> {
     assert.equal(threadRead?.thread.turns[1]?.items[1]?.text, 'Second recovered answer')
     assert.equal(threadRead?.thread.turns[2]?.items[0]?.content?.[0]?.text, '继续')
     assert.equal(threadRead?.thread.turns[2]?.items[1]?.text, 'Third recovered answer')
+
+    const activeSessionPath = join(dir, 'rollout-2026-07-06T10-00-10-thread-active.jsonl')
+    const activeSessionLines = [
+      JSON.stringify({
+        timestamp: '2026-07-06T10:00:10.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          id: 'active-user-1',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Keep working' }],
+          internal_chat_message_metadata_passthrough: { turn_id: 'turn-active-1' },
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-07-06T10:00:10.100Z',
+        type: 'event_msg',
+        payload: { type: 'item_completed', turn_id: 'turn-active-1' },
+      }),
+      JSON.stringify({
+        timestamp: '2026-07-06T10:00:10.500Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          id: 'active-agent-1',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'Still working' }],
+        },
+      }),
+    ]
+    await writeFile(activeSessionPath, `${activeSessionLines.join('\n')}\n`, 'utf8')
+    const activeThreadRead = await parseThreadReadFromSessionLog(activeSessionPath, {
+      thread: { id: 'thread-active-log', path: activeSessionPath, turns: [] },
+    }) as {
+      thread: {
+        inProgress?: boolean
+        activeTurnId?: string
+        status?: { type?: string; activeTurnId?: string }
+        turns: Array<{ id: string; status: string }>
+      }
+    } | null
+    assert.equal(activeThreadRead?.thread.inProgress, true)
+    assert.equal(activeThreadRead?.thread.activeTurnId, 'turn-active-1')
+    assert.equal(activeThreadRead?.thread.status?.type, 'inProgress')
+    assert.equal(activeThreadRead?.thread.status?.activeTurnId, 'turn-active-1')
+    assert.equal(activeThreadRead?.thread.turns[0]?.status, 'inProgress')
+
+    await appendFile(activeSessionPath, `${JSON.stringify({
+      timestamp: '2026-07-06T10:00:11.000Z',
+      type: 'event_msg',
+      payload: { type: 'task_complete', turn_id: 'turn-active-1' },
+    })}\n`, 'utf8')
+    const completedThreadRead = await parseThreadReadFromSessionLog(activeSessionPath, {
+      thread: { id: 'thread-active-log', path: activeSessionPath, turns: [] },
+    }) as {
+      thread: { inProgress?: boolean; activeTurnId?: string; status?: { type?: string } }
+    } | null
+    assert.equal(completedThreadRead?.thread.inProgress, false)
+    assert.equal(completedThreadRead?.thread.activeTurnId, '')
+    assert.equal(completedThreadRead?.thread.status?.type, 'completed')
 
     const imageSessionPath = join(dir, 'rollout-2026-07-06T10-01-00-thread-image.jsonl')
     await writeFile(imageSessionPath, [
@@ -12211,6 +12272,15 @@ async function smokeAppServerThreadRuntimeSnapshot(): Promise<void> {
   assert.equal(cacheFirstSnapshot.messageState, 'cached')
 
   const activeSessionRpcCalls: unknown[] = []
+  const activeSessionRuntimeObservations: unknown[] = []
+  const activeSessionCachedThreadRead = createCachedThreadRead({
+    thread: {
+      id: 'thread-active-session',
+      updatedAt: updatedAtSeconds,
+      inProgress: false,
+      path: 'session-active.jsonl',
+    },
+  }, () => '2026-01-01T00:00:30.000Z', 'app-server')
   const activeSessionThreadRead = {
     thread: {
       id: 'thread-active-session',
@@ -12235,14 +12305,13 @@ async function smokeAppServerThreadRuntimeSnapshot(): Promise<void> {
         thread: {
           id: 'thread-active-session',
           updatedAt: updatedAtSeconds,
-          inProgress: true,
-          activeTurnId: 'turn-active-session',
+          inProgress: false,
           path: 'session-active.jsonl',
         },
       }
     },
     observeThreadRead: () => {},
-    getCachedThreadRead: () => null,
+    getCachedThreadRead: () => activeSessionCachedThreadRead,
     rememberCachedThreadRead: (_threadId, threadRead, source) => createCachedThreadRead(
       threadRead,
       () => '2026-01-01T00:00:30.000Z',
@@ -12257,7 +12326,9 @@ async function smokeAppServerThreadRuntimeSnapshot(): Promise<void> {
       pendingServerRequests: overlay.pendingServerRequests ?? [],
       tokenUsage: overlay.tokenUsage ?? null,
     }),
-    observeRuntimeThreadRead: () => {},
+    observeRuntimeThreadRead: (threadId, inProgress, activeTurnId, updatedAtIso, source) => {
+      activeSessionRuntimeObservations.push({ threadId, inProgress, activeTurnId, updatedAtIso, source })
+    },
     markRuntimeDegraded: () => {
       throw new Error('active session recovery should not mark degraded')
     },
@@ -12273,6 +12344,13 @@ async function smokeAppServerThreadRuntimeSnapshot(): Promise<void> {
   assert.deepEqual(activeSessionRpcCalls.map(readIncludeTurns), [false])
   assert.equal(activeSessionSnapshot.threadRead, activeSessionThreadRead)
   assert.equal(activeSessionSnapshot.messageState, 'cached')
+  assert.deepEqual(activeSessionRuntimeObservations, [{
+    threadId: 'thread-active-session',
+    inProgress: true,
+    activeTurnId: 'turn-active-session',
+    updatedAtIso: '2026-01-01T00:00:00.000Z',
+    source: 'cache',
+  }])
 
   const sessionFallbackCacheHit = createCachedThreadRead(
     sessionFallbackThreadReadPayload,

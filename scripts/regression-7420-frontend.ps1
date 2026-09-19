@@ -609,6 +609,7 @@ function Assert-RuntimeSnapshotOrderingSource {
 
 function Assert-ManualUnreadAndComposerAttachmentSource {
   $appSource = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path (Get-Location) "src\App.vue")
+  $desktopStateSource = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path (Get-Location) "src\composables\useDesktopState.ts")
   $sidebarSource = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path (Get-Location) "src\components\sidebar\SidebarThreadTree.vue")
   $composerSource = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path (Get-Location) "src\components\content\ThreadComposer.vue")
   $composerSearchDropdownSource = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path (Get-Location) "src\components\content\ComposerSearchDropdown.vue")
@@ -620,7 +621,10 @@ function Assert-ManualUnreadAndComposerAttachmentSource {
   Assert-True (([regex]::Matches($sidebarSource, "onToggleThreadUnread\(openThreadMenuThread\)")).Count -eq 1) "the shared sidebar thread menu must expose exactly one unread toggle"
   Assert-True ($sidebarSource -match "openThreadMenuThread\.unread\s*\?\s*'标记为已读'\s*:\s*'标记为未读'") "the unread menu label must reflect the current thread state"
   Assert-True ($appSource -match '@set-thread-unread="onSetThreadUnread"[\s\S]*?function\s+onSetThreadUnread[\s\S]*?markThreadAsUnread[\s\S]*?markThreadAsRead') "the sidebar unread toggle must reach both persisted state actions"
+  Assert-True ($appSource -match ':is-turn-in-progress="isSelectedThreadInProgress"\s*:can-stop="isSelectedThreadInterruptible"') "the desktop composer must use activity state for its stop/send mode and canStop only for interrupt capability"
+  Assert-True ($desktopStateSource -match 'async\s+function\s+interruptSelectedThreadTurn[\s\S]*?if\s*\(!isThreadExecutionActive\(threadId\)\)\s*return[\s\S]*?refreshRuntimeStatusSnapshot\(threadId\)') "interrupting an externally owned Desktop turn must reconcile authoritative activity before requiring a turn id"
   Assert-True ($composerSource -match '@dragenter="onComposerDragEnter"[\s\S]*?@drop="onComposerDrop"') "the composer must own the complete file-drag lifecycle"
+  Assert-True ($composerSource -match 'v-if="shouldShowStopButton"[\s\S]*?:aria-label="stopButtonLabel"[\s\S]*?props\.canStop\s*===\s*false') "an active turn must keep the stop affordance visible while an unconfirmed external turn remains non-interruptible"
   Assert-True ($composerSource -match "function\s+onComposerDrop[\s\S]*?addFiles\(files\)") "dropped files must reuse the existing upload queue"
   Assert-True ($composerSource -match 'function\s+onComposerPaste[\s\S]*?item\.kind\s*===\s*''file''[\s\S]*?event\.preventDefault\(\)[\s\S]*?addFiles\(files\)') "clipboard files must be intercepted without replacing ordinary text paste"
   Assert-True ($composerSource -match 'v-if="isFileDragActive"[\s\S]*?松开即可添加') "file drag feedback must remain visible and explicit"

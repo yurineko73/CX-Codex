@@ -9395,11 +9395,20 @@ export function useDesktopState(submitCallbacks: DesktopStateSubmitCallbacks = {
   async function interruptSelectedThreadTurn(source: RuntimeInterruptSource = 'unknown'): Promise<void> {
     const threadId = selectedThreadId.value
     if (!threadId) return
-    if (inProgressById.value[threadId] !== true) return
+    // A turn owned by Codex Desktop may be visible through the authoritative
+    // runtime snapshot before the local inProgress map has received a
+    // lifecycle notification. Use the unified activity predicate here so the
+    // stop action is not a no-op for cross-process turns.
+    if (!isThreadExecutionActive(threadId)) return
     let turnId = activeTurnIdByThreadId.value[threadId]
     if (!turnId) {
-      const { activeTurnId } = await getThreadDetail(threadId)
-      turnId = activeTurnId
+      const snapshot = await refreshRuntimeStatusSnapshot(threadId)
+      turnId = snapshot?.activeTurnId?.trim() || ''
+      if (!turnId) {
+        const detail = await getThreadDetail(threadId)
+        if (detail.inProgress !== true && !isThreadExecutionActive(threadId)) return
+        turnId = detail.activeTurnId
+      }
       if (turnId) {
         activeTurnIdByThreadId.value = {
           ...activeTurnIdByThreadId.value,
@@ -9408,7 +9417,14 @@ export function useDesktopState(submitCallbacks: DesktopStateSubmitCallbacks = {
       }
     }
     if (!turnId) {
-      throw new Error('Could not determine active turn id for interrupt')
+      // Keep the truthful running state visible. The other Codex process may
+      // still be starting its turn and expose no interruptible turn id yet.
+      setRuntimeExecutionState(threadId, 'running', { canStop: false })
+      setTurnActivityForThread(threadId, {
+        label: 'Syncing',
+        details: ['Desktop 任务仍在运行，正在等待可停止状态'],
+      })
+      return
     }
 
     const activeGoal = threadGoalByThreadId.value[threadId]

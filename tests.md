@@ -1,5 +1,27 @@
 # Tests
 
+## Codex Desktop 外部活动 turn 的 Composer 状态（2026-09-19）
+
+### Expected behavior
+
+1. 当前会话只要仍处于执行中，桌面 Composer 右下角显示停止图标，不再因为暂时没有 `activeTurnId` 而退化为发送按钮。
+2. `canStop` 只决定停止按钮是否可点击；Codex Desktop 另一个进程尚未暴露可中断 `turnId` 时，按钮保持停止态但禁用，并提示正在同步可停止状态。
+3. 点击停止时先读取 Runtime 快照，再读取线程详情补齐 `turnId`；若活动已经结束则不误报，若外部任务仍在启动则保留运行态而不抛出未处理异常。
+
+### Reusable verification
+
+- `npm.cmd run build:frontend`
+- `npm.cmd run test:7420:frontend -- -SourceOnly`
+- `http://<LAN地址>:7420/#/__regression/composer-shell?running=1&canStop=0`：回归夹具应显示“任务运行中，正在同步可停止状态”的停止图标，而不是发送按钮。
+- 使用真实 Codex Desktop 正在执行的会话打开对应 WebUI，确认刷新后 Composer 仍为停止态；拿到 `turnId` 后点击停止，确认任务进入停止/已停止状态。
+
+### Evidence and rollback
+
+- 后续真实 Desktop 验证发现 session-log 行还带有 `ordinal` 字段，旧候选行正则会把整行过滤掉；同时日志回退层此前忽略 `task_started/task_complete`，并把回退 turn 固定成 `completed`。现已兼容 `timestamp → ordinal → type` 格式，识别 task/item 生命周期，并让 session-log 状态覆盖轻量 RPC 的空闲占位值。
+- `npm.cmd run verify:server-modules`、`npm.cmd run build:cli` 通过；真实 LAN API 返回 `inProgress=true`、`executionState=running`、有效 `activeTurnId` 和 `canStop=true`。Headless 浏览器打开真实 Desktop 线程后，侧栏显示“1 个运行中”，Composer 右下角 DOM 按钮为“停止”；截图为 `output/playwright/codex-desktop-real-turn-stop.png`。
+- 本修复只调整前端 Composer 的状态映射、停止前 Runtime 重同步和 session-log 运行态投影，不修改会话文件、Runtime 数据库或公网访问配置。
+- 回滚 `src/App.vue`、`src/components/content/ThreadComposer.vue`、`src/composables/useDesktopState.ts` 及对应回归断言即可。
+
 ## Markdown 15 compatibility (2026-09-08)
 
 - Conversation ordered lists preserve their original starting number when parser attributes are numeric or textual. Headings, quotes and unfinished code fences retain their existing behavior.

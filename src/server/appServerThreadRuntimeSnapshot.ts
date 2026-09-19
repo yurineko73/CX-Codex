@@ -89,6 +89,9 @@ export async function readAppServerThreadRuntimeSnapshot(
     tokenUsage: dependencies.getThreadTokenUsage(normalizedThreadId),
   })
   const sessionPath = lightThreadRead ? readThreadSessionPathFromThreadReadPayload(lightThreadRead) : ''
+  const shouldPreferSessionLog = Boolean(
+    sessionPath && cachedThreadRead?.source === 'app-server',
+  )
   let sessionLogReadAttempted = false
   let threadRead: unknown = null
   let messageState: ThreadRuntimeSnapshot['messageState'] = 'unavailable'
@@ -97,6 +100,7 @@ export async function readAppServerThreadRuntimeSnapshot(
     cachedThreadRead &&
     lightUpdatedAtIso &&
     cachedThreadRead.updatedAtIso === lightUpdatedAtIso &&
+    !shouldPreferSessionLog &&
     !isCachedThreadReadStaleForRuntime(cachedThreadRead, runtimeSnapshotBeforeMessageRead, lightInProgress)
   ) {
     threadRead = cachedThreadRead.threadRead
@@ -193,11 +197,13 @@ export async function readAppServerThreadRuntimeSnapshot(
   const inProgress =
     lightInProgress
     || freshThreadInProgress
-    || (!lightThreadRead && messageState === 'cached' ? cachedThreadInProgress : false)
+    || (messageState === 'cached' ? cachedThreadInProgress : false)
   const activeTurnId =
     (lightThreadRead ? readActiveTurnIdFromThreadReadPayload(lightThreadRead) : '')
     || (threadRead && messageState === 'fresh' ? readActiveTurnIdFromThreadReadPayload(threadRead) : '')
-    || (!lightThreadRead && messageState === 'cached' ? (cachedThreadRead?.activeTurnId ?? readActiveTurnIdFromThreadReadPayload(threadRead)) : '')
+    || (messageState === 'cached'
+      ? (cachedThreadRead?.activeTurnId || readActiveTurnIdFromThreadReadPayload(threadRead))
+      : '')
 
   if (lightThreadRead || threadRead || cachedThreadRead) {
     dependencies.observeRuntimeThreadRead(

@@ -737,8 +737,9 @@
             v-if="shouldShowStopButton"
             class="thread-composer-stop"
             type="button"
-            aria-label="停止"
-            :disabled="disabled || !activeThreadId || isInterruptingTurn"
+            :aria-label="stopButtonLabel"
+            :title="stopButtonLabel"
+            :disabled="disabled || !activeThreadId || isInterruptingTurn || props.canStop === false"
             @click="onInterruptClick"
           >
             <IconTablerPlayerStopFilled class="thread-composer-stop-icon" />
@@ -843,6 +844,7 @@ const props = defineProps<{
   isLoadingPlugins?: boolean
   hasLoadedPlugins?: boolean
   isTurnInProgress?: boolean
+  canStop?: boolean
   isInterruptingTurn?: boolean
   isUpdatingSpeedMode?: boolean
   disabled?: boolean
@@ -1299,6 +1301,11 @@ const shouldShowStopButton = computed(() => (
   props.isTurnInProgress === true
   && !hasSubmitContent.value
   && !isStopGuardActive.value
+))
+const stopButtonLabel = computed(() => (
+  props.canStop === false
+    ? '任务运行中，正在同步可停止状态'
+    : '停止'
 ))
 
 function resolveSubmitMode(): 'steer' | 'queue' {

@@ -7,9 +7,10 @@ const FALLBACK_TURN_LIMIT = 40
 const FALLBACK_ITEM_TEXT_LIMIT = 20_000
 const FALLBACK_READ_BYTE_LIMIT = 24_000_000
 const FALLBACK_CACHE_LIMIT = 40
-const TOP_LEVEL_RESPONSE_ITEM_PATTERN = /^\s*\{(?:\s*"timestamp"\s*:\s*"[^"]*"\s*,)?\s*"type"\s*:\s*"response_item"/
-const TOP_LEVEL_EVENT_MESSAGE_PATTERN = /^\s*\{(?:\s*"timestamp"\s*:\s*"[^"]*"\s*,)?\s*"type"\s*:\s*"event_msg"/
-const TOP_LEVEL_SESSION_META_PATTERN = /^\s*\{(?:\s*"timestamp"\s*:\s*"[^"]*"\s*,)?\s*"type"\s*:\s*"session_meta"/
+const TOP_LEVEL_RECORD_PREFIX = '^\\s*\\{(?:\\s*"timestamp"\\s*:\\s*"[^"]*"\\s*,)?(?:\\s*"ordinal"\\s*:\\s*\\d+\\s*,)?\\s*"type"\\s*:\\s*"'
+const TOP_LEVEL_RESPONSE_ITEM_PATTERN = new RegExp(`${TOP_LEVEL_RECORD_PREFIX}response_item"`)
+const TOP_LEVEL_EVENT_MESSAGE_PATTERN = new RegExp(`${TOP_LEVEL_RECORD_PREFIX}event_msg"`)
+const TOP_LEVEL_SESSION_META_PATTERN = new RegExp(`${TOP_LEVEL_RECORD_PREFIX}session_meta"`)
 const TRAILING_MEMORY_CITATION_PATTERN = /\s*<oai-mem-citation>[\s\S]*<\/oai-mem-citation>\s*$/u
 
 type FallbackItem = {
@@ -32,8 +33,14 @@ type RecoveredMessage = {
 
 type FallbackTurn = {
   id: string
-  status: 'completed'
+  status: 'completed' | 'inProgress'
   items: FallbackItem[]
+}
+
+type SessionLogActivityState = {
+  inProgress: boolean
+  activeTurnId: string
+  observed: boolean
 }
 
 type SessionLogThreadReadCacheState = {
@@ -79,6 +86,63 @@ function readNonNegativeInteger(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
     ? Math.trunc(value)
     : null
+}
+
+function readStringByAliases(record: Record<string, unknown> | null, aliases: string[]): string {
+  if (!record) return ''
+  for (const alias of aliases) {
+    const value = readTrimmedString(record[alias])
+    if (value) return value
+  }
+  return ''
+}
+
+function readFallbackActivityState(thread: Record<string, unknown>): SessionLogActivityState {
+  const status = asRecord(thread.status)
+  const statusType = typeof thread.status === 'string'
+    ? thread.status.trim().toLowerCase()
+    : readTrimmedString(status?.type).toLowerCase()
+  const activeTurnId =
+    readStringByAliases(thread, ['activeTurnId', 'turnId', 'active_turn_id', 'turn_id']) ||
+    readStringByAliases(status, ['activeTurnId', 'turnId', 'active_turn_id', 'turn_id'])
+  const inProgress = thread.inProgress === true ||
+    thread.turnStatus === 'inProgress' ||
+    thread.turnStatus === 'in_progress' ||
+    ['inprogress', 'in_progress', 'running', 'active', 'processing'].includes(statusType) ||
+    (Array.isArray(thread.turns) && thread.turns.some((turnValue) => {
+      const turn = asRecord(turnValue)
+      return turn?.status === 'inProgress'
+    }))
+  return {
+    inProgress,
+    activeTurnId,
+    observed: inProgress || ['completed', 'complete', 'idle', 'notloaded'].includes(statusType),
+  }
+}
+
+function readSessionLogActivityEvent(entry: Record<string, unknown>): {
+  state: 'start' | 'complete'
+  turnId: string
+} | null {
+  if (entry.type !== 'event_msg') return null
+  const payload = asRecord(entry.payload)
+  if (!payload) return null
+  const type = readTrimmedString(payload.type).toLowerCase()
+  const turnId = readStringByAliases(payload, ['turn_id', 'turnId', 'active_turn_id', 'activeTurnId'])
+  if (['task_started', 'task_start', 'turn_started', 'turn_start', 'turn_in_progress', 'item_started', 'item_completed'].includes(type)) {
+    return { state: 'start', turnId }
+  }
+  if (['task_complete', 'task_completed', 'turn_complete', 'turn_completed', 'turn_cancelled', 'turn_canceled', 'turn_interrupted', 'turn_failed', 'turn_error'].includes(type)) {
+    return { state: 'complete', turnId }
+  }
+  const status = readStringByAliases(payload, ['status', 'state']).toLowerCase()
+  if (turnId && ['inprogress', 'in_progress', 'running', 'active', 'processing'].includes(status)) {
+    return { state: 'start', turnId }
+  }
+  if (turnId && ['completed', 'complete', 'cancelled', 'canceled', 'interrupted', 'failed', 'error'].includes(status)) {
+    return { state: 'complete', turnId }
+  }
+  return null
 }
 
 function limitText(value: string): string {
@@ -140,7 +204,7 @@ function cloneFallbackTurns(value: unknown): FallbackTurn[] {
     }
     turns.push({
       id: readTrimmedString(turn.id) || `fallback-turn-${String(turns.length + 1)}`,
-      status: 'completed',
+      status: turn.status === 'inProgress' ? 'inProgress' : 'completed',
       items,
     })
   }
@@ -359,6 +423,7 @@ async function parseThreadReadFromSessionLogRange(
   let createdAt = readUnixSeconds(fallbackThread?.createdAt)
   let updatedAt = readUnixSeconds(fallbackThread?.updatedAt)
   const turns = options.seedTurns === true ? cloneFallbackTurns(fallbackThread.turns) : []
+  const activity: SessionLogActivityState = readFallbackActivityState(fallbackThread)
   let recoveredTurnCount = options.seedTurns === true
     ? Math.max(
         turns.length,
@@ -389,6 +454,22 @@ async function parseThreadReadFromSessionLogRange(
           cwd = cwd || readTrimmedString(payload.cwd)
           source = payload.source ?? source
           createdAt = createdAt || readUnixSeconds(payload.timestamp)
+        }
+      }
+
+      const activityEvent = readSessionLogActivityEvent(entry)
+      if (activityEvent) {
+        activity.observed = true
+        activity.inProgress = activityEvent.state === 'start'
+        activity.activeTurnId = activityEvent.state === 'start' ? activityEvent.turnId : ''
+        if (activityEvent.state === 'start' && activityEvent.turnId) {
+          for (const turn of turns) {
+            if (turn.id === activityEvent.turnId) turn.status = 'inProgress'
+          }
+        } else if (activityEvent.state === 'complete') {
+          for (const turn of turns) {
+            if (!activityEvent.turnId || turn.id === activityEvent.turnId) turn.status = 'completed'
+          }
         }
       }
 
@@ -462,6 +543,13 @@ async function parseThreadReadFromSessionLogRange(
   const knownOriginalTurnsCount = readNonNegativeInteger(fallbackThread.originalTurnsCount) ?? 0
   const originalTurnsCount = Math.max(recoveredTurnCount, knownOriginalTurnsCount, turns.length)
   const turnsStartIndex = Math.max(0, originalTurnsCount - turns.length)
+  const activeTurn = activity.activeTurnId
+    ? turns.find((turn) => turn.id === activity.activeTurnId)
+    : undefined
+  if (activity.inProgress) {
+    if (activeTurn) activeTurn.status = 'inProgress'
+    else if (turns.at(-1)) turns.at(-1)!.status = 'inProgress'
+  }
 
   return {
     thread: {
@@ -478,6 +566,15 @@ async function parseThreadReadFromSessionLogRange(
       source,
       gitInfo: fallbackThread?.gitInfo ?? null,
       turns,
+      ...(activity.observed
+        ? {
+            inProgress: activity.inProgress,
+            activeTurnId: activity.inProgress ? activity.activeTurnId : '',
+            status: activity.inProgress
+              ? { type: 'inProgress', ...(activity.activeTurnId ? { activeTurnId: activity.activeTurnId } : {}) }
+              : { type: 'completed' },
+          }
+        : {}),
       ...(turnsStartIndex > 0
         ? {
             turnsView: 'recent',
